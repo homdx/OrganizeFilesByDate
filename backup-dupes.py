@@ -197,7 +197,16 @@ def validate_and_backup(file_group, delete_sources):
     copied_hash = calculate_sha512(dest_file)
     if copied_hash != list(unique_hashes)[0]:
         log_message("Error: Checksum mismatch after copying!")
-        sys.exit(1)
+        # sys.exit(1)
+        log_message("----------REPEAT----------")
+        log_message("--------------------------")
+        shutil.copy2(first_valid_file, dest_file)
+
+        copied_hash = calculate_sha512(dest_file)
+        if copied_hash != list(unique_hashes)[0]:
+            log_message("Error: Checksum mismatch after copying!")
+            log_message("----------ERROR AFTER REPEAT----------")
+            sys.exit(1)
 
     # Update backup space statistics.
     backup_size = dest_file.stat().st_size

@@ -181,14 +181,14 @@ def process_file_blocks(file_path, delete_sources=False, check_backup=False):
     log_message("Backup process completed successfully.")
 
 def validate_and_backup(file_group, delete_sources):
-    """Validate SHA-512 checksums for a group of files and perform backup.
-       Returns a backup record (dict) if backup is successful, else None."""
-    global total_duplicate_space, total_backup_space, deleted_files_count
-    global total_backup_file_count, failed_backup_count
+    """Normal backup: Validate and copy one file from a group.
+       Returns a record (dict) for the JSON file if successful, else None."""
+    global total_duplicate_space, total_backup_space, deleted_files_count, total_backup_file_count, failed_backup_count
 
     if not file_group:
         return None
 
+    # Calculate checksums for all files in the block.
     checksums = {}
     for file in file_group:
         file_path = Path(file)
@@ -210,25 +210,28 @@ def validate_and_backup(file_group, delete_sources):
 
     unique_hashes = set(checksums.values())
     if len(unique_hashes) > 1:
-        log_message("Error: Files in the same group have different checksums!")
+        log_message("Error: Files in the same block have different checksums!")
         return None
 
     # Update duplicate space statistics.
     duplicate_size = sum(Path(f).stat().st_size for f in checksums if Path(f).exists())
     total_duplicate_space += duplicate_size
 
-    first_valid_file = list(checksums.keys())[0]
+    # Instead of using the first file, choose the file with the largest size.
+    source_files = list(checksums.keys())
+    chosen_source = max(source_files, key=lambda f: Path(f).stat().st_size)
+    first_valid_file = chosen_source  # Use this as the source for backup
+
     cleaned_name = clean_filename(Path(first_valid_file).name)
 
-    # Try to extract date from filename; for MP4 files, override with metadata.
+    # Determine file date: try to extract from filename; for MP4 override with metadata.
     file_date = extract_date_from_filename(cleaned_name)
     if first_valid_file.lower().endswith(".mp4"):
         mp4_date = extract_mp4_creation_time(first_valid_file)
         if mp4_date:
             file_date = mp4_date
             log_message(f"Restored date from metadata for {cleaned_name}: {file_date.strftime('%Y/%m/%d %H:%M:%S')}")
-    
-    # Determine backup folder.
+
     if not file_date:
         log_message(f"Error: Could not extract date for {cleaned_name}. Backing up to 'UNKNOWN' folder.")
         year_folder = DEST_BASE_DIR / "UNKNOWN"
@@ -238,11 +241,8 @@ def validate_and_backup(file_group, delete_sources):
         year_folder = DEST_BASE_DIR / file_date.strftime("%Y")
         month_folder = year_folder / file_date.strftime("%m")
         backup_folder_record = f"{file_date.strftime('%Y')}/{file_date.strftime('%m')}"
-    
-    # Create directories if they don't exist.
-    month_folder.mkdir(parents=True, exist_ok=True)
 
-    # Update folder timestamps if needed.
+    month_folder.mkdir(parents=True, exist_ok=True)
     if file_date:
         required_year = datetime(file_date.year, 1, 1)
         current_year_ts = os.stat(year_folder).st_mtime
@@ -252,12 +252,10 @@ def validate_and_backup(file_group, delete_sources):
         current_month_ts = os.stat(month_folder).st_mtime
         if abs(current_month_ts - required_month.timestamp()) > 1:
             set_folder_timestamp(month_folder, required_month)
-    
+
     dest_file = month_folder / cleaned_name
 
     total_backup_file_count += 1
-
-    # Copy file.
     shutil.copy2(first_valid_file, dest_file)
     copied_hash = calculate_sha512(dest_file)
     if copied_hash != list(unique_hashes)[0]:
@@ -266,8 +264,8 @@ def validate_and_backup(file_group, delete_sources):
         shutil.copy2(first_valid_file, dest_file)
         copied_hash = calculate_sha512(dest_file)
         if copied_hash != list(unique_hashes)[0]:
-            orig_size = Path(first_valid_file).stat().st_size / (1024*1024)
-            backup_size = dest_file.stat().st_size / (1024*1024)
+            orig_size = Path(first_valid_file).stat().st_size / (1024 * 1024)
+            backup_size = dest_file.stat().st_size / (1024 * 1024)
             log_message(f"Error after repeat: Checksum mismatch for file. Original size: {orig_size:.2f} MB, Backup size: {backup_size:.2f} MB")
             failed_backup_count += 1
             return None
@@ -275,16 +273,11 @@ def validate_and_backup(file_group, delete_sources):
             log_message(f"Repeat copy successful: {first_valid_file} -> {dest_file}")
     else:
         log_message(f"Copy successful: {first_valid_file} -> {dest_file}")
-    
-    # (Do not update the file's timestamp; keep the original file timestamp.)
-    
-    # Update backup space statistics.
+
     backup_size = dest_file.stat().st_size
     total_backup_space += backup_size
-
     log_message(f"Backup successful: {first_valid_file} -> {dest_file}")
 
-    # If deletion is enabled, delete all source files with the matching hash.
     if delete_sources:
         for source_file in file_group:
             source_path = Path(source_file)
@@ -295,8 +288,7 @@ def validate_and_backup(file_group, delete_sources):
                     log_message(f"Deleted source file: {source_path}")
                 except Exception as e:
                     log_message(f"Error deleting {source_path}: {e}")
-    
-    # Return a record for the JSON file.
+
     return {
         "backup_path": backup_folder_record,
         "name": cleaned_name,

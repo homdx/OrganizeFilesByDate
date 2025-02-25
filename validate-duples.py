@@ -44,13 +44,15 @@ def get_human_readable_size(file_path):
         size_in_bytes /= 1024.0
 
 def check_image(file_path):
-    """Check if an image is valid by opening it."""
+    """Check if an image is valid by opening and loading it."""
     try:
         with Image.open(file_path) as img:
-            img.verify()
+            img.verify()  # Basic check
+        with Image.open(file_path) as img:
+            img.load()  # Fully load the image to check deeper issues
         return "OK"
     except Exception as e:
-        return f"Image Error: {e}"
+        return f"Image error: {e}"
 
 def check_video(file_path):
     """Compare video integrity check times using CPU vs. QSV (hardware acceleration)."""

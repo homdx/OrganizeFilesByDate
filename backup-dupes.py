@@ -268,15 +268,15 @@ def validate_and_backup(file_group, delete_sources):
 
     # Set the source hash (all files in the block have the same hash)
     # Define the source hash from the unique checksum
+    # Calculate the unique checksum for the source file.
     source_hash = list(unique_hashes)[0]
+    
     default_dest = month_folder / cleaned_name
     if default_dest.exists():
         existing_hash = calculate_sha512(default_dest)
-        if default_dest.stat().st_size == source_size and existing_hash == source_hash:
-            log_message(f"File already exists at {default_dest} with matching size and hash.")
-            dest_file = default_dest
-        else:
-            # Look for an available variant folder (dup-01, dup-02, …)
+        if existing_hash != source_hash:
+            log_message(f"Default destination {default_dest} exists but checksum mismatch detected.")
+            # Use a variant folder since default file is not identical.
             variant_found = None
             for i in range(1, 100):  # allow up to 99 variants
                 variant_code = f"dup-{i:02d}"
@@ -286,8 +286,8 @@ def validate_and_backup(file_group, delete_sources):
                 candidate_file = candidate_folder / cleaned_name
                 if candidate_file.exists():
                     candidate_hash = calculate_sha512(candidate_file)
-                    if candidate_file.stat().st_size == source_size and candidate_hash == source_hash:
-                        log_message(f"File already exists at {candidate_file} with matching size and hash.")
+                    if candidate_hash == source_hash:
+                        log_message(f"File already exists at {candidate_file} with matching checksum.")
                         dest_file = candidate_file
                         variant_found = variant_code
                         break
@@ -296,7 +296,7 @@ def validate_and_backup(file_group, delete_sources):
                 else:
                     dest_file = candidate_file
                     variant_found = variant_code
-                    log_message(f"File size or hash mismatch detected at default location. Copying to variant folder: {variant_code}")
+                    log_message(f"Copying to variant folder: {variant_code} due to checksum mismatch at default destination.")
                     break
             if variant_found is None:
                 log_message("Error: Could not determine a candidate variant folder for backup.")
@@ -304,6 +304,10 @@ def validate_and_backup(file_group, delete_sources):
                 return None
             else:
                 variant_used = variant_found
+        else:
+            log_message(f"Default destination {default_dest} exists and matches in checksum.")
+            dest_file = default_dest
+            variant_used = "default"
     else:
         dest_file = default_dest
         variant_used = "default"

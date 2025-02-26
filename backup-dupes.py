@@ -10,12 +10,14 @@ import os
 import subprocess
 import logging
 import time  # For measuring total process time
+import statistics
 from pathlib import Path
 from datetime import datetime
 from PIL import Image
 
 # Use fdupes for create the file file_list.txt
-# time sudo fdupes -r /path/to/find/dupes >file_list.txt
+# time sudo fdupes -r /path/to/find/duples >file_list.txt
+# Check files before backup with : valudate-duples.py
 
 # Global statistics for backup mode
 total_duplicate_space = 0
@@ -30,7 +32,6 @@ failed_backup_count = 0
 SOURCE_FILE = "file_list.txt"  # Change this to your actual text file
 DEST_BASE_DIR = Path("/backup")  # Base backup folder
 BACKUP_DATA_FILE = "backup_data.json"  # JSON file to store backup records
-
 # Create a dynamic log file name based on today's date.
 LOG_FILE = "backup." + datetime.now().strftime("%Y%m%d") + ".log"
 
@@ -40,9 +41,14 @@ TRASHED_PATTERN = re.compile(r"\.trashed-\d+-")  # Matches `.trashed-*` prefix
 
 # Setup logging to file and console.
 logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format="%(asctime)s - %(message)s")
+
 def log_message(message):
     print(message)
     logging.info(message)
+
+def format_seconds(sec):
+    """Convert seconds to HH:MM:SS format."""
+    return time.strftime("%H:%M:%S", time.gmtime(sec))
 
 def get_human_size(bytes_size):
     """Convert bytes to a human-readable format."""
@@ -159,10 +165,24 @@ def process_file_blocks(file_path, delete_sources=False, check_backup=False):
     # Load existing backup data (if any).
     backup_records = load_backup_data()
 
-    for block in blocks:
+    # Array to store block processing times.
+    block_times = []
+    total_blocks = len(blocks)
+
+    for i, block in enumerate(blocks):
+        block_start = time.time()
         record = validate_and_backup(block, delete_sources)
+        block_elapsed = time.time() - block_start
+        block_times.append(block_elapsed)
         if record:
             backup_records.append(record)
+
+        # Estimate remaining time based on the median block time.
+        remaining_blocks = total_blocks - (i + 1)
+        median_time = statistics.median(block_times) if block_times else 0
+        estimated_remaining_time = median_time * remaining_blocks
+        working_time = time.time() - overall_start_time
+        log_message(f"[{format_seconds(estimated_remaining_time)}] time to remain [{i+1}/{total_blocks}]. Working time [{format_seconds(working_time)}]")
 
     # Save the updated backup records.
     save_backup_data(backup_records)
@@ -241,7 +261,7 @@ def validate_and_backup(file_group, delete_sources):
         year_folder = DEST_BASE_DIR / file_date.strftime("%Y")
         month_folder = year_folder / file_date.strftime("%m")
         backup_folder_record = f"{file_date.strftime('%Y')}/{file_date.strftime('%m')}"
-
+    
     month_folder.mkdir(parents=True, exist_ok=True)
     if file_date:
         required_year = datetime(file_date.year, 1, 1)
@@ -260,17 +280,9 @@ def validate_and_backup(file_group, delete_sources):
         if abs(current_month_ts - required_month.timestamp()) > 1:
             set_folder_timestamp(month_folder, required_month)
 
-    # ----- NEW LOGIC FOR VARIANT HANDLING BASED ON FILE SIZE -----
+    # ----- NEW LOGIC FOR VARIANT HANDLING BASED ON FILE SIZE AND CHECKSUM -----
     source_size = Path(first_valid_file).stat().st_size
-    variant_used = "default"
-
-    default_dest = month_folder / cleaned_name
-
-    # Set the source hash (all files in the block have the same hash)
-    # Define the source hash from the unique checksum
-    # Calculate the unique checksum for the source file.
     source_hash = list(unique_hashes)[0]
-    
     default_dest = month_folder / cleaned_name
     if default_dest.exists():
         existing_hash = calculate_sha512(default_dest)
@@ -286,7 +298,7 @@ def validate_and_backup(file_group, delete_sources):
                 candidate_file = candidate_folder / cleaned_name
                 if candidate_file.exists():
                     candidate_hash = calculate_sha512(candidate_file)
-                    if candidate_hash == source_hash:
+                    if candidate_file.stat().st_size == source_size and candidate_hash == source_hash:
                         log_message(f"File already exists at {candidate_file} with matching checksum.")
                         dest_file = candidate_file
                         variant_found = variant_code
@@ -332,7 +344,7 @@ def validate_and_backup(file_group, delete_sources):
         if file_date:
             os.utime(dest_file, (file_date.timestamp(), file_date.timestamp()))
         copied_hash = calculate_sha512(dest_file)
-        if copied_hash != list(unique_hashes)[0]:
+        if copied_hash != source_hash:
             orig_size = Path(first_valid_file).stat().st_size / (1024 * 1024)
             backup_size = dest_file.stat().st_size / (1024 * 1024)
             log_message(f"Error after repeat: Checksum mismatch for file. Original size: {orig_size:.2f} MB, Backup size: {backup_size:.2f} MB")
@@ -371,7 +383,7 @@ def validate_and_backup(file_group, delete_sources):
     }
 
 def check_backup_data():
-    """Read backup_data.json and check each backup file's SHA-512 sum while logging speed statistics and failures."""
+    """Read backup_data.json and check each backup file's SHA-512 sum while logging speed statistics and progress."""
     records = load_backup_data()
     if not records:
         log_message("No backup records found in JSON file.")
@@ -383,7 +395,12 @@ def check_backup_data():
     file_count = 0
     failed_count = 0  # Count of files with checksum failures
 
-    for record in records:
+    # Array to store per-record check times.
+    check_times = []
+    total_records = len(records)
+
+    for i, record in enumerate(records):
+        record_start = time.time()
         file_count += 1
         backup_path = record.get("backup_path", "")
         name = record.get("name", "")
@@ -394,6 +411,13 @@ def check_backup_data():
         if not full_path.exists():
             log_message(f"File missing: {full_path}")
             failed_count += 1
+            record_elapsed = time.time() - record_start
+            check_times.append(record_elapsed)
+            remaining_records = total_records - (i + 1)
+            median_time = statistics.median(check_times) if check_times else 0
+            estimated_remaining_time = median_time * remaining_records
+            working_time = time.time() - overall_start_time
+            log_message(f"[{format_seconds(estimated_remaining_time)}] time to remain [{i+1}/{total_records}]. Working time [{format_seconds(working_time)}]")
             continue
 
         file_size = full_path.stat().st_size
@@ -404,6 +428,7 @@ def check_backup_data():
         file_end_time = time.time()
 
         elapsed = file_end_time - file_start_time
+        check_times.append(elapsed)
         speed_file = (file_size / (1024 * 1024)) / elapsed if elapsed > 0 else 0
 
         overall_elapsed = file_end_time - overall_start_time
@@ -416,6 +441,12 @@ def check_backup_data():
         else:
             log_message(f"File OK: {full_path} (speed: {speed_file:.2f} MB/sec)")
         log_message(f"Cumulative average speed so far: {cumulative_speed:.2f} MB/sec\n")
+
+        remaining_records = total_records - (i + 1)
+        median_time = statistics.median(check_times) if check_times else 0
+        estimated_remaining_time = median_time * remaining_records
+        working_time = time.time() - overall_start_time
+        log_message(f"[{format_seconds(estimated_remaining_time)}] time to remain [{i+1}/{total_records}]. Working time [{format_seconds(working_time)}]")
 
     final_elapsed = time.time() - overall_start_time
     overall_speed = (total_size_checked / (1024 * 1024)) / final_elapsed if final_elapsed > 0 else 0

@@ -252,16 +252,81 @@ def validate_and_backup(file_group, delete_sources):
         current_month_ts = os.stat(month_folder).st_mtime
         if abs(current_month_ts - required_month.timestamp()) > 1:
             set_folder_timestamp(month_folder, required_month)
+    else:
+        # Fallback: use the first day of the current month
+        current = datetime.now()
+        required_month = datetime(current.year, current.month, 1)
+        current_month_ts = os.stat(month_folder).st_mtime
+        if abs(current_month_ts - required_month.timestamp()) > 1:
+            set_folder_timestamp(month_folder, required_month)
 
-    dest_file = month_folder / cleaned_name
+    # ----- NEW LOGIC FOR VARIANT HANDLING BASED ON FILE SIZE -----
+    source_size = Path(first_valid_file).stat().st_size
+    variant_used = "default"
+
+    default_dest = month_folder / cleaned_name
+
+    # Set the source hash (all files in the block have the same hash)
+    # Define the source hash from the unique checksum
+    source_hash = list(unique_hashes)[0]
+    default_dest = month_folder / cleaned_name
+    if default_dest.exists():
+        existing_hash = calculate_sha512(default_dest)
+        if default_dest.stat().st_size == source_size and existing_hash == source_hash:
+            log_message(f"File already exists at {default_dest} with matching size and hash.")
+            dest_file = default_dest
+        else:
+            # Look for an available variant folder (dup-01, dup-02, …)
+            variant_found = None
+            for i in range(1, 100):  # allow up to 99 variants
+                variant_code = f"dup-{i:02d}"
+                candidate_folder = month_folder / variant_code
+                candidate_folder.mkdir(parents=True, exist_ok=True)
+                set_folder_timestamp(candidate_folder, required_month)
+                candidate_file = candidate_folder / cleaned_name
+                if candidate_file.exists():
+                    candidate_hash = calculate_sha512(candidate_file)
+                    if candidate_file.stat().st_size == source_size and candidate_hash == source_hash:
+                        log_message(f"File already exists at {candidate_file} with matching size and hash.")
+                        dest_file = candidate_file
+                        variant_found = variant_code
+                        break
+                    else:
+                        continue
+                else:
+                    dest_file = candidate_file
+                    variant_found = variant_code
+                    log_message(f"File size or hash mismatch detected at default location. Copying to variant folder: {variant_code}")
+                    break
+            if variant_found is None:
+                log_message("Error: Could not determine a candidate variant folder for backup.")
+                failed_backup_count += 1
+                return None
+            else:
+                variant_used = variant_found
+    else:
+        dest_file = default_dest
+        variant_used = "default"
+
+    # If destination file does not exist, perform the copy and update file timestamp.
+    if not dest_file.exists():
+        shutil.copy2(first_valid_file, dest_file)
+        if file_date:
+            os.utime(dest_file, (file_date.timestamp(), file_date.timestamp()))
+
+    # ----- END NEW LOGIC -----
 
     total_backup_file_count += 1
-    shutil.copy2(first_valid_file, dest_file)
     copied_hash = calculate_sha512(dest_file)
     if copied_hash != list(unique_hashes)[0]:
         log_message("Error: Checksum mismatch after copying!")
-        print("----------REPEAT----------")
+        log_message("----------REPEAT----------")
+        orig_size = Path(first_valid_file).stat().st_size / (1024 * 1024)
+        backup_size = dest_file.stat().st_size / (1024 * 1024)
+        log_message(f"Before repeat: Checksum mismatch for file. Original size: {orig_size:.2f} MB, Backup size: {backup_size:.2f} MB")
         shutil.copy2(first_valid_file, dest_file)
+        if file_date:
+            os.utime(dest_file, (file_date.timestamp(), file_date.timestamp()))
         copied_hash = calculate_sha512(dest_file)
         if copied_hash != list(unique_hashes)[0]:
             orig_size = Path(first_valid_file).stat().st_size / (1024 * 1024)
@@ -289,10 +354,16 @@ def validate_and_backup(file_group, delete_sources):
                 except Exception as e:
                     log_message(f"Error deleting {source_path}: {e}")
 
+    # Update backup folder record if a variant folder was used.
+    if variant_used != "default":
+        backup_folder_record = backup_folder_record + "/" + variant_used
+
     return {
         "backup_path": backup_folder_record,
         "name": cleaned_name,
-        "sha512sum": copied_hash
+        "sha512sum": copied_hash,
+        "file_size": source_size,
+        "variant": variant_used
     }
 
 def check_backup_data():

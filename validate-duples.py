@@ -12,6 +12,9 @@ from PIL import Image
 # Run: time sudo fdupes -r /path/to/find/dupes > file_list.txt
 # This script checks JPG and video files from file_list.txt and creates file_list-fixed.txt with good files. After that, use backup-dupes.py
 
+# After this program has finished, you should look for differences between the removed broken files (only from text file):
+# diff -Naur file_list-fixed.txt file_list.txt | grep '^-[^-]' | sed 's/^-//'
+
 # Global variable to track the total size of broken files
 total_broken_size = 0
 

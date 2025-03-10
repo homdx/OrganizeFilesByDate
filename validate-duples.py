@@ -1,11 +1,15 @@
 #!/usr/bin/python
 
+import sys
 import os
 import hashlib
+import re
 import subprocess
+import logging
 import time
-import datetime
-from collections import defaultdict
+import statistics
+from pathlib import Path
+from datetime import datetime
 from PIL import Image
 
 # Use fdupes to create the file_list.txt
@@ -15,19 +19,26 @@ from PIL import Image
 # After this program has finished, you should look for differences between the removed broken files (only from text file):
 # diff -Naur file_list-fixed.txt file_list.txt | grep '^-[^-]' | sed 's/^-//'
 
-# Global variable to track the total size of broken files
-total_broken_size = 0
+# Setup logging
+LOG_FILE = "file_check_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".log"
+logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format="%(asctime)s - %(message)s")
 
-# Generate log file name with current date and time
-log_filename = f"file_check_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+def log_message(msg):
+    print(msg)
+    with open(LOG_FILE, "a", encoding="utf-8") as lf:
+        lf.write(msg + "\n")
 
-def log_message(message):
-    """Write log messages to both console and file."""
-    print(message)
-    with open(log_filename, "a", encoding="utf-8") as log_file:
-        log_file.write(message + "\n")
+def format_seconds(sec):
+    return time.strftime("%H:%M:%S", time.gmtime(sec))
 
-def compute_sha512(file_path):
+def get_human_readable_size(num_bytes):
+    for unit in ['B','KB','MB','GB','TB']:
+        if num_bytes < 1024:
+            return f"{num_bytes:.2f} {unit}"
+        num_bytes /= 1024
+    return f"{num_bytes:.2f} PB"
+
+def calculate_sha512(file_path):
     sha512 = hashlib.sha512()
     try:
         with open(file_path, "rb") as f:
@@ -35,169 +46,258 @@ def compute_sha512(file_path):
                 sha512.update(chunk)
         return sha512.hexdigest()
     except Exception as e:
-        log_message(f"DEBUG: Error computing SHA512 for {file_path}: {e}")
+        log_message(f"Error calculating SHA512 for {file_path}: {e}")
         return None
 
-def get_human_readable_size(file_path):
-    """Returns the human-readable size of a file (e.g., KB, MB, GB)."""
-    size_in_bytes = os.path.getsize(file_path)
-    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-        if size_in_bytes < 1024.0:
-            return f"{size_in_bytes:.2f} {unit}"
-        size_in_bytes /= 1024.0
-
 def check_image(file_path):
-    """Check if an image is valid by opening and loading it."""
     try:
         with Image.open(file_path) as img:
-            img.verify()  # Basic check
+            img.verify()
         with Image.open(file_path) as img:
-            img.load()  # Fully load the image to check deeper issues
-        return "OK"
+            img.load()
+        return True
     except Exception as e:
-        return f"Image error: {e}"
+        log_message(f"Image check failed for {file_path}: {e}")
+        return False
 
 def check_video(file_path):
-    """Compare video integrity check times using CPU vs. QSV (hardware acceleration)."""
-    log_message(f"Checking: {file_path}")
+    """Check video integrity using QSV if available; fallback to CPU check."""
+    log_message(f"Checking video: {file_path}")
+    if USE_QSV:
+        try:
+            start = time.time()
+            cmd_qsv = [
+                "ffmpeg",
+                "-init_hw_device", "qsv=hw",
+                "-filter_hw_device", "hw",
+                "-hwaccel", "qsv",
+                "-v", "error",
+                "-i", str(file_path),
+                "-f", "null", "-"
+            ]
+            result_qsv = subprocess.run(cmd_qsv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            elapsed_qsv = time.time() - start
+            if result_qsv.returncode == 0:
+                log_message(f"  QSV Check: {elapsed_qsv:.2f}s - OK")
+                return True
+            else:
+                log_message(f"  QSV Check: {elapsed_qsv:.2f}s - Error: {result_qsv.stderr.strip()} -- falling back to CPU check")
+        except Exception as e:
+            log_message(f"  QSV Check exception: {e} -- falling back to CPU check")
+    try:
+        start_cpu = time.time()
+        cmd_cpu = [
+            "ffmpeg",
+            "-v", "error",
+            "-i", str(file_path),
+            "-f", "null", "-"
+        ]
+        result_cpu = subprocess.run(cmd_cpu, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        elapsed_cpu = time.time() - start_cpu
+        status_cpu = "OK" if result_cpu.returncode == 0 else f"Error: {result_cpu.stderr.strip()}"
+        log_message(f"  CPU Check: {elapsed_cpu:.2f}s - {status_cpu}")
+        return result_cpu.returncode == 0
+    except Exception as e:
+        log_message(f"  CPU Check exception: {e}")
+        return False
 
-    start_qsv = time.time()
-    cmd_qsv = [
-        "ffmpeg",
-        "-init_hw_device", "qsv=hw",
-        "-filter_hw_device", "hw",
-        "-hwaccel", "qsv",
-        "-v", "error",
-        "-i", file_path,
-        "-f", "null", "-"
-    ]
-    result_qsv = subprocess.run(cmd_qsv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-    qsv_time = time.time() - start_qsv
-    qsv_status = "OK" if result_qsv.returncode == 0 else f"Error: {result_qsv.stderr.strip()}"
-
-    log_message(f"  QSV Check: {qsv_time:.2f}s - {qsv_status}")
-
-    return {
-        "qsv_time": qsv_time,
-        "qsv_status": qsv_status
-    }
+def is_supported(file_path):
+    ext = Path(file_path).suffix.lower()
+    return ext in {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", 
+                    ".mp4", ".mov", ".avi", ".mkv", ".flv", ".ts", ".mts"}
 
 def check_file(file_path):
-    """Function to check file integrity"""
-    global total_broken_size
-
-    ext = os.path.splitext(file_path)[1].lower()
-    log_message(f"DEBUG: Checking file type {file_path}")
-
-    if ext in [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff"]:
-        result = check_image(file_path)
-    elif ext in [".mp4", ".mov", ".avi", ".mkv", ".flv", ".ts"]:
-        result = check_video(file_path)
+    p = Path(file_path)
+    if not p.exists():
+        log_message(f"File does not exist: {file_path}")
+        return False
+    if not is_supported(file_path):
+        log_message(f"Skipping unsupported file: {file_path}")
+        return False
+    ext = p.suffix.lower()
+    if ext in {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff"}:
+        return check_image(file_path)
     else:
-        return "Unknown type - skipped"
-    
-    # If the file is broken, add its size to the total.
-    # For images, the result is a string; for videos, it's a dict.
-    if (isinstance(result, str) and "Error" in result) or \
-       (isinstance(result, dict) and result.get("qsv_status", "").startswith("Error")):
-        file_size = os.path.getsize(file_path)
-        total_broken_size += file_size
-        log_message(f"Broken file detected: {file_path} (Size: {file_size / (1024 * 1024):.2f} MB)")
+        return check_video(file_path)
 
-    return result
+def process_block(block_lines):
+    """
+    Process a block (list of file paths) by:
+      - Calculating SHA512 for each file.
+      - Grouping files by hash.
+      - Checking one representative file per group.
+    Returns (good_files, broken_files, block_total_bytes).
+    """
+    group = {}
+    sizes = {}
+    for line in block_lines:
+        file_path = line.strip()
+        if not file_path:
+            continue
+        p = Path(file_path)
+        try:
+            size = p.stat().st_size
+        except Exception:
+            size = 0
+        sizes[file_path] = size
+        if not p.exists():
+            key = "MISSING_" + file_path
+            group.setdefault(key, []).append(file_path)
+        elif not is_supported(file_path):
+            key = "UNSUPPORTED_" + file_path
+            group.setdefault(key, []).append(file_path)
+        else:
+            h = calculate_sha512(file_path)
+            if h is None:
+                key = "BROKEN_" + file_path
+                group.setdefault(key, []).append(file_path)
+            else:
+                group.setdefault(h, []).append(file_path)
+    good_files = []
+    broken_files = []
+    for key, files in group.items():
+        if key.startswith("MISSING_") or key.startswith("UNSUPPORTED_") or key.startswith("BROKEN_"):
+            broken_files.extend(files)
+        else:
+            rep = files[0]
+            log_message(f"DEBUG: Checking representative for group {key} in block: {files}")
+            if check_file(rep):
+                good_files.extend(files)
+            else:
+                broken_files.extend(files)
+    block_total = sum(sizes.values())
+    return good_files, broken_files, block_total
 
-def is_integrity_ok(result):
-    """Helper function to determine if the integrity check passed."""
-    if isinstance(result, str):
-        return result == "OK"
-    elif isinstance(result, dict):
-        return result.get("qsv_status") == "OK"
-    return False
+def test_qsv():
+    """Test if QSV hardware acceleration is available using a short nullsrc test."""
+    try:
+        cmd = [
+            "ffmpeg",
+            "-init_hw_device", "qsv=hw",
+            "-filter_hw_device", "hw",
+            "-hwaccel", "qsv",
+            "-v", "error",
+            "-f", "lavfi",
+            "-i", "nullsrc=s=128x128",
+            "-t", "1",
+            "-f", "null", "-"
+        ]
+        result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=15)
+        return result.returncode == 0
+    except subprocess.TimeoutExpired:
+        log_message("QSV test timed out.")
+        return False
 
-def print_broken_file_summary():
-    """Print the total size of all broken files found."""
-    global total_broken_size
-    log_message(f"Total size of broken files: {total_broken_size / (1024 * 1024):.2f} MB")
+# Global flag for QSV usage.
+USE_QSV = True
 
 def main():
-    # Read the source file with blocks separated by double newlines.
-    with open("file_list.txt", "r", encoding="utf-8") as f:
+    global USE_QSV
+    if test_qsv():
+        log_message("QSV acceleration is available. Using QSV for video checks.")
+        USE_QSV = True
+    else:
+        log_message("QSV acceleration is NOT available. Falling back to CPU for video checks.")
+        USE_QSV = False
+
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} <source_text_file>")
+        sys.exit(1)
+    source_txt = sys.argv[1]
+    source_path = Path(source_txt)
+    if not source_path.exists():
+        print(f"Source file {source_txt} does not exist.")
+        sys.exit(1)
+
+    base_name = source_path.stem
+    fixed_txt_filename = source_path.parent / f"{base_name}-fixed.txt"
+    broken_txt_filename = source_path.parent / f"{base_name}-broken.txt"
+
+    with source_path.open("r", encoding="utf-8") as f:
         content = f.read()
-    
-    blocks = [block.strip() for block in content.strip().split("\n\n") if block.strip()]
-    totalblocks = len(blocks)
-    log_message(f"DEBUG: Total blocks found: {totalblocks}")
-    
-    # Group records by a combination of block index and file hash.
-    file_groups = {}
-    checked_files = []
-    total_broken_files = 0
-    failed_blocks = set()
-    
-    # Process each block with debug output.
-    for block_index, block in enumerate(blocks):
-        log_message(f"DEBUG: Processing block {block_index + 1} of {totalblocks}")
+
+    blocks = [block.strip().splitlines() for block in content.strip().split("\n\n") if block.strip()]
+    total_blocks = len(blocks)
+    log_message(f"Total blocks found: {total_blocks}")
+
+    total_bytes = 0
+    for block in blocks:
+        for file_path in block:
+            file_path = file_path.strip()
+            if file_path:
+                try:
+                    total_bytes += Path(file_path).stat().st_size
+                except Exception:
+                    pass
+
+    fixed_blocks = []
+    all_broken_files = []
+    overall_good_total = 0     # Sum of sizes of all good files (each file in block)
+    overall_backup_size = 0    # Sum of sizes for backup (one representative per block)
+    block_good_sizes = []      # Sum of sizes of good files per block
+    block_backup_sizes = []    # Size of chosen file per block
+    processed_bytes = 0
+    start_time = time.time()
+
+    for i, block in enumerate(blocks, start=1):
+        log_message(f"DEBUG: Starting processing block {i}/{total_blocks}. Block content: {block}")
+        good_files, broken_files, block_total = process_block(block)
+        fixed_blocks.append(good_files)
+        all_broken_files.extend(broken_files)
         
-        # Each block may have multiple file paths (one per line)
-        lines = [line.strip() for line in block.splitlines() if line.strip()]
-        block_hashes = {}
-        
-        # Compute the hashes for all files in the block.
-        for file_path in lines:
-            log_message(f"DEBUG: Checking file: {file_path}")
-            file_hash = compute_sha512(file_path)
-            if file_hash:
-                block_hashes.setdefault(file_hash, []).append(file_path)
-        
-        # For each unique hash in the block, check integrity using one selected file,
-        # but store all file paths sharing that hash.
-        for file_hash, file_paths in block_hashes.items():
-            if len(file_paths) > 1:
-                log_message(f"\nFile(s) with hash {file_hash} found in multiple locations:")
-                for file_path in file_paths:
-                    log_message(f"  {file_path}")
-            
-            selected_file = file_paths[0]
-            file_size = get_human_readable_size(selected_file)
-            log_message(f"  Selected file for integrity check: {selected_file} (Size: {file_size})")
-            check_result = check_file(selected_file)
-            log_message(f"DEBUG: Integrity check for {selected_file}: {check_result}")
-            
-            if not is_integrity_ok(check_result):
-                total_broken_files += 1
-                failed_blocks.add(block_index)
-            
-            # Store group using key (block_index, file_hash)
-            file_groups[(block_index, file_hash)] = {
-                "block": block_index,
-                "files": file_paths,
-                "hash": file_hash,
-                "check": check_result,
-                "size": file_size
-            }
-            
-            # If the file passed the check, add all its associated file paths to checked_files.
-            if is_integrity_ok(check_result):
-                checked_files.extend(file_paths)
-    
-    # Write the new fixed text file with files that passed the integrity check.
-    fixed_txt_filename = "file_list-fixed.txt"
+        # Sum sizes of good files in this block.
+        block_total_good = 0
+        for gf in good_files:
+            try:
+                block_total_good += Path(gf).stat().st_size
+            except Exception:
+                pass
+        block_good_sizes.append(block_total_good)
+        overall_good_total += block_total_good
+
+        # For backup size, choose one representative (largest good file) per block.
+        if good_files:
+            rep = max(good_files, key=lambda f: Path(f).stat().st_size)
+            rep_size = Path(rep).stat().st_size
+            block_backup_sizes.append(rep_size)
+            overall_backup_size += rep_size
+            log_message(f"Block {i}: Selected {rep} ({get_human_readable_size(rep_size)}) for backup size.")
+        else:
+            block_backup_sizes.append(0)
+            log_message(f"Block {i}: No good files found for backup selection.")
+
+        processed_bytes += block_total
+        elapsed = time.time() - start_time
+        current_rate = processed_bytes / elapsed if elapsed > 0 else 0
+        remaining_bytes = total_bytes - processed_bytes
+        estimated_remaining_time = remaining_bytes / current_rate if current_rate > 0 else 0
+
+        log_message(f"Block {i}: {len(good_files)} good, {len(broken_files)} broken; Block good size: {get_human_readable_size(block_total_good)}")
+        log_message(f"[{format_seconds(estimated_remaining_time)}] remain. Working time [{format_seconds(elapsed)}]\n")
+
     with open(fixed_txt_filename, "w", encoding="utf-8") as f:
-        for block_index in range(totalblocks):
-            block_files = []
-            for (b, h), group in file_groups.items():
-                if b == block_index and is_integrity_ok(group["check"]):
-                    block_files.extend(group["files"])
-            if block_files:
-                f.write("\n".join(block_files) + "\n\n")
-    
+    # Only join blocks that contain at least one file.
+        output = "\n\n".join("\n".join(block) for block in fixed_blocks if block)
+        f.write(output)
+
+
     log_message(f"Fixed file list created: {fixed_txt_filename}")
 
-    # Output statistics
-    log_message(f"\nTotal blocks checked: {totalblocks}")
-    log_message(f"Total broken files: {total_broken_files}")
-    log_message(f"Failed blocks: {len(failed_blocks)} out of {totalblocks} blocks.")
-    print_broken_file_summary()
+    # Write broken file list.
+    with open(broken_txt_filename, "w", encoding="utf-8") as f:
+        for file_path in all_broken_files:
+            f.write(file_path + "\n")
+    log_message(f"Broken files list created: {broken_txt_filename}")
+
+    overall_time = time.time() - start_time
+    log_message("\n==== Summary ====")
+    log_message(f"Total size of all good files: {get_human_readable_size(overall_good_total)}")
+    log_message(f"Overall backup size (one representative per block): {get_human_readable_size(overall_backup_size)}")
+    for i, size in enumerate(block_good_sizes, start=1):
+        log_message(f"Block {i} total good files size: {get_human_readable_size(size)}")
+    for i, size in enumerate(block_backup_sizes, start=1):
+        log_message(f"Block {i} backup file size: {get_human_readable_size(size)}")
+    log_message(f"Total processing time: {format_seconds(overall_time)}")
 
 if __name__ == "__main__":
     main()

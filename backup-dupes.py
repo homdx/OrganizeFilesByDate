@@ -33,12 +33,11 @@ failed_backup_count = 0
 # Global flag for manufacturer-based backup folder
 USE_MANUFACTURER = False
 
- # Files and directories
+# Files and directories
 SOURCE_FILE = "file_list.txt"  # Change this to your actual text file
 DEST_BASE_DIR = Path("/backup")  # Base backup folder
 BACKUP_DATA_FILE = "backup_data.json"  # JSON file to store backup records
 
-BACKUP_DATA_FILE = "backup_datam0.json"  # JSON file to store backup records
 # Create a dynamic log file name based on today's date.
 LOG_FILE = "backup." + datetime.now().strftime("%Y%m%d") + ".log"
 
@@ -56,6 +55,8 @@ PATTERN3 = re.compile(r"Screenshot_(\d{8})[-_]")
 # Setup logging to file and console.
 logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format="%(asctime)s - %(message)s")
 
+def remove_nulls(s):
+    return s.replace("\x00", "")
 
 def log_message(message):
     print(message)
@@ -182,7 +183,7 @@ def get_file_date(file_path, cleaned_name):
             log_message(f"Error reading EXIF for {file_path}: {e}")
 
     # Strategy 2: For video files, try ffprobe
-    if ext in {".mp4", ".mov"}:
+    if ext in {".mp4", ".mov", ".avi", ".mkv", ".flv", ".ts", ".mts"}:
         mp4_date = extract_mp4_creation_time(file_path)
         if mp4_date:
             return mp4_date
@@ -233,7 +234,7 @@ def estimate_block_size(file_group):
         if not file_path.exists():
             continue
         ext = file_path.suffix.lower()
-        if ext not in {".jpg", ".jpeg", ".mov", ".mp4"}:
+        if ext not in {".jpg", ".jpeg", ".mov", ".mp4",".avi", ".mkv", ".flv", ".ts", ".mts"}:
             continue
         if ext in {".jpg", ".jpeg"} and not has_exif(file_path):
             continue
@@ -330,7 +331,7 @@ def validate_and_backup(file_group, delete_sources):
         if not file_path.exists():
             log_message(f"Error: File not found - {file}")
             continue
-        if file_path.suffix.lower() not in {".jpg", ".jpeg", ".mov", ".mp4", ".png"}:
+        if file_path.suffix.lower() not in {".jpg", ".jpeg", ".mov", ".mp4", ".avi", ".mkv", ".flv", ".ts", ".mts", ".png"}:
             log_message(f"Skipping unsupported file: {file}")
             continue
         if file_path.suffix.lower() in {".jpg", ".jpeg"} and not has_exif(file_path):
@@ -354,7 +355,9 @@ def validate_and_backup(file_group, delete_sources):
     source_files = list(checksums.keys())
     chosen_source = max(source_files, key=lambda f: Path(f).stat().st_size)
     first_valid_file = chosen_source
-    cleaned_name = clean_filename(Path(first_valid_file).name)
+    # fix This error usually means that one of the strings used in the folder path contains an unexpected null byte ("\x00"). cleaned_name = clean_filename(Path(first_valid_file).name)
+    cleaned_name = remove_nulls(clean_filename(Path(first_valid_file).name))
+
 
     # Get file date using our new multi-strategy function.
     file_date = get_file_date(first_valid_file, cleaned_name)
@@ -372,6 +375,8 @@ def validate_and_backup(file_group, delete_sources):
             # First try EXIF for JPEGs.
             if Path(first_valid_file).suffix.lower() in {".jpg", ".jpeg"} and has_exif(first_valid_file):
                 manufacturer = get_camera_model(first_valid_file)
+                if manufacturer:
+                    manufacturer = remove_nulls(manufacturer)
             # If not found, use a regex on the filename.
             if not manufacturer:
                 m = re.match(r"^([A-Za-z]+)", Path(first_valid_file).name)
@@ -528,10 +533,8 @@ def check_backup_data():
     file_count = 0
     failed_count = 0  # Count of files with checksum failures
 
-    total_estimated_bytes = sum(record.get("file_size", 0) for record in records)
-    processed_bytes = 0
-    check_times = []
     total_records = len(records)
+    check_times = []  # list to store per-file check times
 
     for i, record in enumerate(records):
         record_start = time.time()
@@ -547,40 +550,33 @@ def check_backup_data():
             failed_count += 1
             record_elapsed = time.time() - record_start
             check_times.append(record_elapsed)
-            processed_bytes += record.get("file_size", 0)
-            remaining_bytes = total_estimated_bytes - processed_bytes
-            working_time = time.time() - overall_start_time
-            current_rate = processed_bytes / working_time if working_time > 0 else 0
-            estimated_remaining_time = remaining_bytes / current_rate if current_rate > 0 else 0
-            log_message(f"[{format_seconds(estimated_remaining_time)}] time to remain [{i+1}/{total_records}]. Working time [{format_seconds(working_time)}]")
-            continue
-
-        file_size = full_path.stat().st_size
-        total_size_checked += file_size
-
-        file_start_time = time.time()
-        current_hash = calculate_sha512(full_path)
-        file_end_time = time.time()
-
-        elapsed = file_end_time - file_start_time
-        check_times.append(elapsed)
-        processed_bytes += file_size
-        speed_file = (file_size / (1024 * 1024)) / elapsed if elapsed > 0 else 0
-
-        overall_elapsed = file_end_time - overall_start_time
-        current_rate = processed_bytes / overall_elapsed if overall_elapsed > 0 else 0
-        remaining_bytes = total_estimated_bytes - processed_bytes
-        estimated_remaining_time = remaining_bytes / current_rate if current_rate > 0 else 0
-
-        log_message(f"Time for current file: {elapsed:.2f} sec, average speed: {speed_file:.2f} MB/sec")
-        if current_hash != expected_hash:
-            log_message(f"Checksum mismatch for {full_path} (expected {expected_hash}, got {current_hash}) (speed: {speed_file:.2f} MB/sec)")
-            failed_count += 1
         else:
-            log_message(f"File OK: {full_path} (speed: {speed_file:.2f} MB/sec)")
-        log_message(f"Cumulative average speed so far: {(total_size_checked/(1024*1024))/overall_elapsed:.2f} MB/sec\n")
+            file_size = full_path.stat().st_size
+            total_size_checked += file_size
+
+            file_start_time = time.time()
+            current_hash = calculate_sha512(full_path)
+            file_end_time = time.time()
+
+            elapsed = file_end_time - file_start_time
+            check_times.append(elapsed)
+            speed_file = (file_size / (1024 * 1024)) / elapsed if elapsed > 0 else 0
+
+            log_message(f"Time for current file: {elapsed:.2f} sec, average speed: {speed_file:.2f} MB/sec")
+            if current_hash != expected_hash:
+                log_message(f"Checksum mismatch for {full_path} (expected {expected_hash}, got {current_hash}) (speed: {speed_file:.2f} MB/sec)")
+                failed_count += 1
+            else:
+                log_message(f"File OK: {full_path} (speed: {speed_file:.2f} MB/sec)")
+
+            log_message(f"Cumulative average speed so far: {(total_size_checked/(1024*1024))/(time.time()-overall_start_time):.2f} MB/sec")
 
         working_time = time.time() - overall_start_time
+        # Estimate remaining time based on median per-file check time.
+        median_time = statistics.median(check_times) if check_times else 0
+        remaining_files = total_records - (i + 1)
+        estimated_remaining_time = median_time * remaining_files
+
         log_message(f"[{format_seconds(estimated_remaining_time)}] time to remain [{i+1}/{total_records}]. Working time [{format_seconds(working_time)}]")
 
     final_elapsed = time.time() - overall_start_time
@@ -589,7 +585,6 @@ def check_backup_data():
     log_message(f"Total files checked: {file_count}")
     log_message(f"Total failed files: {failed_count}")
     log_message(f"Total time: {final_elapsed:.2f} sec, overall average speed: {overall_speed:.2f} MB/sec")
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(

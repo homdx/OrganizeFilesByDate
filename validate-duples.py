@@ -19,6 +19,11 @@ from PIL import Image
 # After this program has finished, you should look for differences between the removed broken files (only from text file):
 # diff -Naur file_list-fixed.txt file_list.txt | grep '^-[^-]' | sed 's/^-//'
 
+# Alternative method: Create a list of files to validate:
+# find /path/to/folder -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.gif" -o -iname "*.bmp" -o -iname "*.tiff" -o -iname "*.mp4" -o -iname "*.mov" -o -iname "*.avi" -o -iname "*.mkv" -o -iname "*.flv" -o -iname "*.ts" -o -iname "*.mts" \) > file_list_bak.txt
+# Separate entries with an empty line to ensure proper processing:
+# sed G file_list_bak.txt  >file-list.txt && rm file_list_bak.txt 
+
 # Setup logging
 LOG_FILE = "file_check_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".log"
 logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format="%(asctime)s - %(message)s")
